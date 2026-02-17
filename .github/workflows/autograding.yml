@@ -1,0 +1,136 @@
+name: Autograding Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate Variant Config
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import json
+          import os
+
+          spec = importlib.util.spec_from_file_location("get_variant", "scripts/get_variant.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          variant = module.get_my_variant()
+          with open(".variant_config.json", "w", encoding="utf-8") as f:
+              json.dump(variant, f, indent=2)
+
+          print(
+              "Generated variant for {student} (group {group}) in {repo}".format(
+                  student=variant.get("student_id", "unknown"),
+                  group=variant.get("group_id"),
+                  repo=os.environ.get("GITHUB_REPOSITORY", "local"),
+              )
+          )
+          PY
+
+      - name: Install Dependencies
+        run: |
+          pip install pytest pytest-json-report
+
+      - name: Run Visible Tests
+        run: |
+          pytest tests/visible/ \
+            --json-report \
+            --json-report-file=visible_results.json \
+            -v --tb=short
+
+      - name: Run Hidden Tests
+        if: always()
+        run: |
+          pytest tests/hidden/ \
+            --json-report \
+            --json-report-file=hidden_results.json \
+            -v --tb=short
+
+      - name: Calculate Score
+        if: always()
+        run: |
+          python - <<'PY' >> $GITHUB_STEP_SUMMARY
+          import json
+
+          visible_passed = 0
+          visible_total = 0
+          hidden_passed = 0
+          hidden_total = 0
+
+          try:
+              with open("visible_results.json") as f:
+                  vr = json.load(f)
+              visible_passed = vr["summary"].get("passed", 0)
+              visible_total = vr["summary"].get("total", 0)
+          except Exception:
+              pass
+
+          try:
+              with open("hidden_results.json") as f:
+                  hr = json.load(f)
+              hidden_passed = hr["summary"].get("passed", 0)
+              hidden_total = hr["summary"].get("total", 0)
+          except Exception:
+              pass
+
+          visible_pct = (visible_passed / visible_total * 100) if visible_total > 0 else 0
+          hidden_pct = (hidden_passed / hidden_total * 100) if hidden_total > 0 else 0
+
+          # Visible 40% + Hidden 30% = 70 total
+          visible_score = (visible_passed / visible_total * 40) if visible_total > 0 else 0
+          hidden_score = (hidden_passed / hidden_total * 30) if hidden_total > 0 else 0
+          total_score = visible_score + hidden_score
+
+          report = []
+          report.append("## Lab 3: Data Structures - Test Results")
+          report.append("")
+          report.append(f"**Total Score: {total_score:.1f} / 70**")
+          report.append("")
+          report.append("| Category | Passed | Total | Percentage | Weighted |")
+          report.append("|----------|--------|-------|------------|----------|")
+          report.append(
+              f"| Visible Tests | {visible_passed} | {visible_total} "
+              f"| {visible_pct:.1f}% | {visible_score:.1f} / 40 |"
+          )
+          report.append(
+              f"| Hidden Tests | {hidden_passed} | {hidden_total} "
+              f"| {hidden_pct:.1f}% | {hidden_score:.1f} / 30 |"
+          )
+          report.append("")
+
+          if total_score >= 70:
+              report.append("All tests passed! Great work!")
+          elif total_score >= 49:
+              report.append("Good progress - review the failed tests.")
+          else:
+              report.append("Review the test output and check your code.")
+
+          print("\n".join(report))
+          PY
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            visible_results.json
+            hidden_results.json
